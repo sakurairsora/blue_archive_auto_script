@@ -3,12 +3,11 @@ from __future__ import annotations
 
 from functools import partial
 
-from PyQt5.QtCore import Qt, QPointF, QRectF, QSize
+from PyQt5.QtCore import Qt, QPointF, QRectF
 from PyQt5.QtGui import (
     QColor,
     QPainter,
     QPainterPath,
-    QPalette,
     QRadialGradient,
 )
 from PyQt5.QtWidgets import (
@@ -19,128 +18,122 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QGridLayout,
     QFrame,
-    QComboBox,
     QSizePolicy,
-    QStyledItemDelegate,
 )
 
-from qfluentwidgets import LineEdit, SwitchButton
+from qfluentwidgets import ComboBox, LineEdit, SwitchButton
+
+try:
+    from qfluentwidgets.components.widgets.menu import (
+        ComboBoxMenu,
+        MenuAnimationManager,
+        MenuAnimationType,
+    )
+except Exception:  # 极旧版本没有动画注册表时退回默认弹出
+    ComboBoxMenu = None
+    MenuAnimationManager = None
+    MenuAnimationType = None
 
 from gui.util import notification
+from gui.util.config_gui import configGui, COLOR_THEME
 from gui.util.translator import baasTranslator as bt
+from gui.components.shop_goods import is_dark_theme
+from gui.components.expand.shop_panel import _display_mode
 
 
-class _ComboItemDelegate(QStyledItemDelegate):
-    """Give every popup option the same readable height as the combo."""
-
-    def sizeHint(self, option, index):
-        size = super().sizeHint(option, index)
-        return QSize(max(size.width(), 1), 34)
+_COMBO_POPUP_MS = 100  # 需求：咖啡厅下拉 0.1s 完全弹出
 
 
-class _CafeComboBox(QComboBox):
-    """Native combo with a guaranteed visible right-side indicator."""
+if ComboBoxMenu is not None:
 
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._arrow = QLabel("▼", self)
-        self._arrow.setAlignment(Qt.AlignCenter)
-        self._arrow.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-        self._arrow.setStyleSheet(
-            "QLabel{color:#527da6;background:transparent;font-size:10px;}"
-            "QLabel:disabled{color:#999999;}"
-        )
+    class CafeComboMenu(ComboBoxMenu):
+        """qfluentwidgets 组合菜单：Card 模式无动画，List 模式 0.1s 揭示式。
 
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        self._arrow.setGeometry(max(0, self.width() - 24), 0, 24, self.height())
-        self._arrow.raise_()
+        Card 配置弹窗继承 MaskDialogBase，是 WA_TranslucentBackground +
+        FramelessWindowHint 的分层透明窗口；下拉 popup 覆盖其上时，
+        任何逐帧动画（揭示式 setMask 或淡入式 windowOpacity）都要系统
+        重新合成整棵透明分层窗口栈，下拉明显卡顿。改用无动画类型
+        NONE：popup 仅定位后一次性显示，合成只发生一次，规避每帧
+        重合成。List 模式背后是不透明主窗口，合成便宜，维持原揭示式
+        弹出（0.1s）。
+        """
 
-    def changeEvent(self, event):
-        super().changeEvent(event)
-        self._arrow.setEnabled(self.isEnabled())
+        def exec(self, pos, ani=True, aniType=MenuAnimationType.DROP_DOWN):
+            try:
+                if _display_mode() == "Card":
+                    aniType = MenuAnimationType.NONE
+                self.aniManager = MenuAnimationManager.make(self, aniType)
+                self.aniManager.exec(pos)
+                # NONE（Card）不启动 ani，压时长无意义且无害；揭示式
+                # （List）压到 0.1s 完全弹出。淡入式不再使用，无需再压
+                # opacityAni（淡入式管理器才有的属性）。
+                if aniType != MenuAnimationType.NONE:
+                    self.aniManager.ani.setDuration(_COMBO_POPUP_MS)
+                self.show()
+                if getattr(self, "isSubMenu", False):
+                    self.menuItem.setSelected(True)
+                return
+            except Exception:
+                return super().exec(pos, ani, aniType)
+
+    class CafeComboBox(ComboBox):
+        """直接用 qfluentwidgets 下拉框，只换出 0.1s 弹出的菜单。"""
+
+        def _createComboMenu(self):
+            return CafeComboMenu(self)
+
+else:
+
+    class CafeComboBox(ComboBox):
+        pass
 
 
-def _tune_combo(combo: QComboBox, item_count: int = 0) -> None:
-    """Keep cafe option menus compact, immediate and visually light."""
+def _tune_combo(combo: CafeComboBox, item_count: int = 0) -> None:
+    """行为调优：可见项数量与最小高度；配色完全交给 qfluentwidgets 主题。"""
     visible = 10 if item_count > 10 else max(item_count, 1)
     combo.setMaxVisibleItems(visible)
     combo.setMinimumHeight(34)
-    combo.setMaximumHeight(280)
 
-    palette = combo.palette()
-    palette.setColor(QPalette.Base, QColor(255, 255, 255))
-    palette.setColor(QPalette.Button, QColor(255, 255, 255))
-    palette.setColor(QPalette.AlternateBase, QColor(238, 247, 255))
-    palette.setColor(QPalette.Highlight, QColor(219, 239, 255))
-    palette.setColor(QPalette.HighlightedText, QColor(26, 26, 26))
-    combo.setPalette(palette)
-    combo.setStyleSheet(
-        "QComboBox {"
-        "  color: #1a1a1a;"
-        "  background: #ffffff;"
-        "  border: 1px solid rgba(80, 120, 170, 80);"
-        "  border-radius: 5px;"
-        "  padding: 5px 26px 5px 9px;"
-        "  min-height: 20px;"
-        "}"
-        "QComboBox:hover {"
-        "  border-color: rgba(55, 125, 190, 145);"
-        "  background: #ffffff;"
-        "}"
-        "QComboBox:focus {"
-        "  border-color: rgba(45, 125, 200, 180);"
-        "}"
-        "QComboBox:disabled {"
-        "  color: #888888;"
-        "  background: #eeeeee;"
-        "  border-color: rgba(0, 0, 0, 55);"
-        "}"
-        "QComboBox::drop-down {"
-        "  width: 24px;"
-        "  border: none;"
-        "  background: transparent;"
-        "}"
-        "QComboBox QAbstractItemView {"
-        "  color: #1a1a1a;"
-        "  background: #ffffff;"
-        "  alternate-background-color: #f6fbff;"
-        "  border: 1px solid rgba(80, 120, 170, 70);"
-        "  border-radius: 6px;"
-        "  padding: 4px;"
-        "  outline: none;"
-        "  selection-background-color: #dbefff;"
-        "  selection-color: #1a1a1a;"
-        "}"
-    )
-    view = combo.view()
-    view.setMouseTracking(True)
-    view.viewport().setMouseTracking(True)
-    view.setItemDelegate(_ComboItemDelegate(view))
-    view.setAlternatingRowColors(False)
-    view.setStyleSheet(
-        "QAbstractItemView {"
-        "  color: #1a1a1a;"
-        "  background: #ffffff;"
-        "  border: 1px solid rgba(80, 120, 170, 70);"
-        "  padding: 4px;"
-        "  outline: none;"
-        "  selection-background-color: #dbefff;"
-        "  selection-color: #1a1a1a;"
-        "}"
-        "QAbstractItemView::item {"
-        "  min-height: 28px;"
-        "  padding: 3px 8px;"
-        "  border-radius: 4px;"
-        "}"
-        "QAbstractItemView::item:hover {"
-        "  color: #1a1a1a;"
-        "  background: #dbefff;"
-        "}"
-        "QAbstractItemView::item:selected {"
-        "  color: #1a1a1a;"
-        "  background: #dbefff;"
-        "}"
+
+def _cafe_bg() -> str:
+    """面板/单元格底色：深色模式用深色主题底色，浅色模式跟随调色板基色。"""
+    if is_dark_theme():
+        return COLOR_THEME[configGui.theme.value]['background']
+    return "palette(base)"
+
+
+def _panel_bg() -> str:
+    """面板底色。深色下蓝色渐变装饰照常绘制（见 paintEvent）。"""
+    return _cafe_bg()
+
+
+def _cell_bg() -> str:
+    return _cafe_bg()
+
+
+def _text_css() -> str:
+    """正文标签文字颜色：深色模式近白字（主题白色），浅色交给调色板。
+
+    咖啡厅正文不需要描边，与其他配置部位的白字保持一致即可。
+    """
+    if is_dark_theme():
+        return f"color:{COLOR_THEME[configGui.theme.value]['text']};background:transparent;"
+    return "background:transparent;"
+
+
+def _title_color(active: bool) -> str:
+    """分区标题前景色：深色模式直接用主题近白字，浅色跟随调色板。"""
+    theme = COLOR_THEME[configGui.theme.value]
+    if is_dark_theme():
+        return theme['text'] if active else theme['text__gray']
+    return "palette(text)" if active else "palette(placeholder-text)"
+
+
+def _left_title_css() -> str:
+    # 字号与字体族交给上游统一规则（弹窗 * 样式表 / 设置卡 QLabel 级联），
+    # 这里只保留分区标题的加粗，避免自定一套字体造成不一致。
+    return (
+        f'font-weight:600;color:{_title_color(True)};background:transparent;'
     )
 
 
@@ -158,13 +151,20 @@ class GradientPanel(QFrame):
         self.setObjectName(object_name)
         self._title_h = title_h
         self.setAttribute(Qt.WA_StyledBackground, True)
-        self.setStyleSheet(
-            f"QFrame#{object_name} {{"
+        configGui.themeChanged.connect(self._repaint_theme)
+        self._repaint_theme()
+
+    def _current_style(self) -> str:
+        return (
+            f"QFrame#{self.objectName()} {{"
             "  border: 1px solid rgba(80, 120, 170, 40);"
             "  border-radius: 10px;"
-            "  background: palette(base);"
+            f"  background: {_panel_bg()};"
             "}"
         )
+
+    def _repaint_theme(self, *_):
+        self.setStyleSheet(self._current_style())
 
     def paintEvent(self, event):
         super().paintEvent(event)
@@ -253,6 +253,7 @@ class GradientPanel(QFrame):
 class CafeCard(GradientPanel):
     def __init__(self, title: str, parent=None):
         super().__init__(parent, object_name="cafeCard", title_h=42)
+        self._active = True
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.setMinimumHeight(150)
 
@@ -263,10 +264,6 @@ class CafeCard(GradientPanel):
 
         self.title_lbl = QLabel(title, self)
         self.title_lbl.setFixedHeight(24)
-        self.title_lbl.setStyleSheet(
-            'font-family:"Microsoft YaHei";font-size:15px;'
-            'font-weight:600;color:palette(text);background:transparent;'
-        )
         self.root.addWidget(self.title_lbl, 0, Qt.AlignTop)
 
         self.body = QVBoxLayout()
@@ -277,27 +274,32 @@ class CafeCard(GradientPanel):
         self.root.addStretch(1)
         self.set_active(True)
 
-    def set_active(self, active: bool, *, animate: bool = False):
-        background = "palette(base)" if active else "palette(alternate-base)"
-        border = (
-            "rgba(80, 120, 170, 40)"
-            if active
-            else "rgba(0, 0, 0, 30)"
-        )
-        self.setStyleSheet(
+    def _current_style(self) -> str:
+        dark = is_dark_theme()
+        if getattr(self, "_active", True):
+            background = _cafe_bg() if dark else "palette(base)"
+            border = "rgba(80, 120, 170, 40)"
+        else:
+            background = _cafe_bg() if dark else "palette(alternate-base)"
+            border = "rgba(255, 255, 255, 26)" if dark else "rgba(0, 0, 0, 30)"
+        return (
             "QFrame#cafeCard {"
             f"  border: 1px solid {border};"
             "  border-radius: 10px;"
             f"  background: {background};"
             "}"
         )
-        # 标题前景跟随调色板：深色主题下 palette(base) 面板上的文字仍可读。
+
+    def set_active(self, active: bool, *, animate: bool = False):
+        self._active = bool(active)
+        self._repaint_theme()
+        # 标题前景：深色主题直接用主题近白字，浅色主题跟随调色板。
+        # 字体族与字号跟随上游统一规则，这里只保留加粗。
         self.title_lbl.setStyleSheet(
-            'font-family:"Microsoft YaHei";font-size:15px;'
-            f'font-weight:600;color:{"palette(text)" if active else "palette(placeholder-text)"};'
+            f'font-weight:600;color:{_title_color(self._active)};'
             'background:transparent;'
         )
-        self._set_body_enabled(active)
+        self._set_body_enabled(self._active)
 
     def _set_body_enabled(self, on: bool):
         for i in range(self.body.count()):
@@ -376,10 +378,8 @@ class Layout(QWidget):
 
         left_title = QLabel(self.tr("通用设置"), left)
         left_title.setFixedHeight(24)
-        left_title.setStyleSheet(
-            'font-family:"Microsoft YaHei";font-size:15px;'
-            'font-weight:600;color:palette(text);background:transparent;'
-        )
+        left_title.setStyleSheet(_left_title_css())
+        self._left_title = left_title
         left_lay.addWidget(left_title)
 
         grid = QGridLayout()
@@ -392,10 +392,20 @@ class Layout(QWidget):
         self.swExchange = self._make_switch("cafe_reward_allow_exchange_student")
         self.swDup = self._make_switch("cafe_reward_allow_duplicate_invite")
 
+        # 中文下这三条在固定位置换行；其他语言用翻译文本自动换行。
+        if bt.isChinese():
+            invite_label = "是否使用\n邀请券:"
+            exchange_label = "是否允许\n学生更换服饰:"
+            duplicate_label = "是否允许\n重复邀请:"
+        else:
+            invite_label = self.tr("是否使用邀请券:")
+            exchange_label = self.tr("是否允许学生更换服饰:")
+            duplicate_label = self.tr("是否允许重复邀请:")
+
         grid.addWidget(self._stack_cell(self.tr("是否领取奖励:"), self.swCollect), 0, 0)
-        grid.addWidget(self._stack_cell(self.tr("是否使用邀请券:"), self.swInvite), 0, 1)
-        grid.addWidget(self._stack_cell(self.tr("是否允许学生更换服饰:"), self.swExchange), 1, 0)
-        grid.addWidget(self._stack_cell(self.tr("是否允许重复邀请:"), self.swDup), 1, 1)
+        grid.addWidget(self._stack_cell(invite_label, self.swInvite), 0, 1)
+        grid.addWidget(self._stack_cell(exchange_label, self.swExchange), 1, 0)
+        grid.addWidget(self._stack_cell(duplicate_label, self.swDup), 1, 1)
 
         self.inputPatRound = LineEdit()
         self.inputPatRound.setFixedWidth(56)
@@ -407,7 +417,7 @@ class Layout(QWidget):
         )
 
         # Locked dropdown (still a ComboBox — unlock by setEnabled(True) later).
-        self.inputPatStyle = _CafeComboBox()
+        self.inputPatStyle = CafeComboBox()
         self.inputPatStyle.addItems(self.pat_styles)
         self.inputPatStyle.setCurrentText(self.pat_style)
         _tune_combo(self.inputPatStyle, len(self.pat_styles))
@@ -443,7 +453,8 @@ class Layout(QWidget):
         en_row = QHBoxLayout(en_host)
         en_row.setContentsMargins(0, 0, 0, 0)
         en_lab = QLabel(self.tr("是否有二号咖啡厅:"))
-        en_lab.setStyleSheet("background: transparent;")
+        en_lab.setObjectName("cafeText")
+        en_lab.setStyleSheet(_text_css())
         en_row.addWidget(en_lab, 0, Qt.AlignLeft | Qt.AlignVCenter)
         self.second_switch = SwitchButton()
         self.second_switch.setChecked(bool(self.config.get("cafe_reward_has_no2_cafe")))
@@ -462,6 +473,7 @@ class Layout(QWidget):
         self.root_layout.addLayout(right, 3)
         self._rebuild_cafe_bodies()
         self._update_layout_direction(self.width())
+        configGui.themeChanged.connect(self._repaint_theme)
 
     def _update_layout_direction(self, width: int):
         direction = (
@@ -488,23 +500,18 @@ class Layout(QWidget):
         return sw
 
     def _stack_cell(self, label: str, switch: SwitchButton) -> QFrame:
-        """Solid white cell — gradient must not show through controls."""
+        """Solid cell — gradient must not show through controls."""
         box = QFrame()
         box.setObjectName("cafeCell")
-        box.setStyleSheet(
-            "QFrame#cafeCell {"
-            "  background: palette(base);"
-            "  border: 1px solid rgba(0,0,0,18);"
-            "  border-radius: 8px;"
-            "}"
-        )
+        box.setStyleSheet(self._cell_style())
         lay = QVBoxLayout(box)
         lay.setContentsMargins(10, 8, 10, 8)
         lay.setSpacing(6)
         lb = QLabel(label)
         lb.setWordWrap(True)
-        lb.setAlignment(Qt.AlignHCenter | Qt.AlignTop)
-        lb.setStyleSheet("background: transparent;")
+        lb.setAlignment(Qt.AlignCenter)
+        lb.setObjectName("cafeText")
+        lb.setStyleSheet(_text_css())
         lay.addWidget(lb)
         lay.addWidget(switch, 0, Qt.AlignHCenter)
         return box
@@ -512,22 +519,47 @@ class Layout(QWidget):
     def _inline_cell(self, label: str, widget: QWidget) -> QFrame:
         box = QFrame()
         box.setObjectName("cafeCell")
-        box.setStyleSheet(
-            "QFrame#cafeCell {"
-            "  background: palette(base);"
-            "  border: 1px solid rgba(0,0,0,18);"
-            "  border-radius: 8px;"
-            "}"
-        )
+        box.setStyleSheet(self._cell_style())
         lay = QHBoxLayout(box)
         lay.setContentsMargins(10, 8, 10, 8)
         lb = QLabel(label)
         lb.setWordWrap(True)
+        lb.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         lb.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
-        lb.setStyleSheet("background: transparent;")
+        lb.setObjectName("cafeText")
+        lb.setStyleSheet(_text_css())
         lay.addWidget(lb, 1)
         lay.addWidget(widget, 0)
         return box
+
+    @staticmethod
+    def _cell_style() -> str:
+        """单元格底色：深色模式黑底，浅色模式跟随调色板基色。"""
+        return (
+            "QFrame#cafeCell {"
+            f"  background: {_cell_bg()};"
+            "  border: 1px solid rgba(0,0,0,18);"
+            "  border-radius: 8px;"
+            "}"
+        )
+
+    def _repaint_theme(self, *_):
+        """主题切换时刷新单元格底色、正文文字与标题颜色。
+
+        面板/卡片自身底色在 GradientPanel 里已各自响应 themeChanged，
+        这里补齐单元格、正文标签与各分区标题的亮/暗配色。
+        """
+        style = self._cell_style()
+        for frame in self.findChildren(QFrame, "cafeCell"):
+            frame.setStyleSheet(style)
+        text_css = _text_css()
+        for label in self.findChildren(QLabel, "cafeText"):
+            label.setStyleSheet(text_css)
+        if getattr(self, "_left_title", None) is not None:
+            self._left_title.setStyleSheet(_left_title_css())
+        for card in (getattr(self, "card1", None), getattr(self, "card2", None)):
+            if card is not None:
+                card.set_active(getattr(card, "_active", True))
 
     def _clear_layout(self, layout):
         while layout.count():
@@ -561,10 +593,12 @@ class Layout(QWidget):
         mode_row = QHBoxLayout()
         lab = QLabel(self.tr("邀请券选择模式："))
         lab.setWordWrap(True)
+        lab.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         lab.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
-        lab.setStyleSheet("background: transparent;")
+        lab.setObjectName("cafeText")
+        lab.setStyleSheet(_text_css())
         mode_row.addWidget(lab, 0)
-        mode_select = _CafeComboBox()
+        mode_select = CafeComboBox()
         keys = list(self.name_dict.keys())
         mode_select.addItems(keys)
         _tune_combo(mode_select, len(keys))
@@ -585,10 +619,12 @@ class Layout(QWidget):
     def _init_student_sel(self, no):
         label = QLabel(self.tr("列表选择你要添加邀请的学生，失焦后写入草稿："))
         label.setWordWrap(True)
+        label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
-        label.setStyleSheet("background: transparent;")
+        label.setObjectName("cafeText")
+        label.setStyleSheet(_text_css())
         laySelect, layInput = QHBoxLayout(), QHBoxLayout()
-        comboStudent = _CafeComboBox()
+        comboStudent = CafeComboBox()
         comboStudent.addItem(self.tr("添加学生"))
         comboStudent.addItems(self.student_name)
         _tune_combo(comboStudent, len(self.student_name) + 1)
@@ -611,9 +647,11 @@ class Layout(QWidget):
         layout = QHBoxLayout()
         label = QLabel(self.tr("选择收藏学生的序号"))
         label.setWordWrap(True)
+        label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
-        label.setStyleSheet("background: transparent;")
-        comboPosition = _CafeComboBox()
+        label.setObjectName("cafeText")
+        label.setStyleSheet(_text_css())
+        comboPosition = CafeComboBox()
         comboPosition.addItems(["1", "2", "3", "4", "5"])
         _tune_combo(comboPosition, 5)
         comboPosition.blockSignals(True)

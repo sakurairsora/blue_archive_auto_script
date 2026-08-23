@@ -20,7 +20,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QFontMetrics
 from PyQt5.QtTest import QTest
-from PyQt5.QtWidgets import QApplication, QBoxLayout, QLabel, QWidget
+from PyQt5.QtWidgets import QApplication, QBoxLayout, QFrame, QLabel, QScrollArea, QWidget
 from qfluentwidgets import ScrollArea
 
 from gui.components.expand import arenaShopPriority, shopPriority
@@ -31,7 +31,6 @@ from gui.components.shop_goods import (
     GRID_H_SPACING,
     MIN_COL_W,
     SHOP_MAX_WIDTH,
-    SHOP_VIEWPORT_HEIGHT,
     GoodsCard,
     ShopGoodCard,
     ShopGoodsGrid,
@@ -109,6 +108,26 @@ class ShopAndCafeLayoutTest(unittest.TestCase):
         self.assertIn("default", colors)
         self.assertIsInstance(colors, dict)
 
+    def test_category_colors_are_qcolor_parseable(self):
+        # 深色模式下商品名用分类底色做描边字填充，QColor 解析失败
+        # 会得到无效黑色（曾因此出现“所有文字黑底”的回归），
+        # 所以分类底色必须是 QColor 可解析的十六进制值。
+        from PyQt5.QtGui import QColor
+        from gui.components.shop_goods import get_category_colors
+
+        for name, value in get_category_colors().items():
+            self.assertTrue(QColor(value).isValid(), name)
+
+    def test_check_color_follows_theme_color_setting(self):
+        # 勾色必须跟随设置中可修改的「主题颜色」（选中框除外）。
+        from PyQt5.QtGui import QColor
+        from gui.components.shop_goods import _check_color
+        from gui.util.config_gui import configGui
+
+        self.assertEqual(
+            QColor(configGui.themeColor.value).name(), _check_color().name()
+        )
+
     # ------------------------------------------------------------------
     # GoodsCard
     # ------------------------------------------------------------------
@@ -160,6 +179,19 @@ class ShopAndCafeLayoutTest(unittest.TestCase):
 
         minimum = GRID_COLUMNS * MIN_COL_W + GRID_H_SPACING * (GRID_COLUMNS - 1)
         self.assertGreaterEqual(grid.minimumSizeHint().width(), minimum)
+
+    def test_grid_minimum_height_follows_actual_width(self):
+        # 网格最小高度必须跟随真实宽度：构造期宽度为 0 时曾按默认宽度
+        # 量高并把该高度锁成最小高度，宽窗口下真实内容更矮，滚动区域
+        # 误判内容超高、强行出滚动条并裁掉底部（竞技场商店的回归）。
+        grid = ShopGoodsGrid()
+        grid.set_cards([GoodsCard(i, f"Item {i} name", "50") for i in range(8)])
+        self.widgets.append(grid)
+        self.assertLessEqual(grid.minimumSizeHint().height(), 40)
+
+        grid.resize(700, 400)
+        self.app.processEvents()
+        self.assertEqual(grid.heightForWidth(700), grid.minimumSizeHint().height())
 
     # ------------------------------------------------------------------
     # ShopPanel refresh input must match the executor's limit
@@ -230,6 +262,51 @@ class ShopAndCafeLayoutTest(unittest.TestCase):
         self.assertEqual([1], config.get("CommonShopList"))
 
     # ------------------------------------------------------------------
+    # Dark theme: upstream dark background + white text, no pure black
+    # ------------------------------------------------------------------
+
+    def test_dark_mode_shop_and_cafe_use_theme_tokens(self):
+        from qfluentwidgets import Theme
+        from gui.util.config_gui import configGui, COLOR_THEME
+
+        dark = COLOR_THEME["Dark"]
+        configGui.set(configGui.themeMode, Theme.DARK, save=False)
+        try:
+            # 商品卡：底色用深色主题底色（不是纯黑），商品名保留
+            # 与分类底色一致的颜色，不用纯白字。
+            card = GoodsCard(0, "Advanced Report", "50", category="exp_book")
+            self.widgets.append(card)
+            self.assertIn(dark["background"], card.styleSheet())
+            self.assertNotIn("#000000", card.styleSheet())
+            self.assertIn("#F2F0F0", card.name_lbl.styleSheet())
+
+            # 商店顶栏：文字为主题白字；刷新控件为上游半透明构成，
+            # 深色下不能整块发白。
+            config = _Config(common_goods=[["Advanced Report", 25, "creditpoints"]])
+            editor = shopPriority.Layout(config=config)
+            self.widgets.append(editor)
+            self.assertIn(dark["text"], editor.guide_label.styleSheet())
+            self.assertIn("font-weight:bold", editor.guide_label.styleSheet())
+            self.assertIn("rgba(0, 0, 0, 4)", editor.refresh_box.styleSheet())
+            self.assertNotIn("palette(base)", editor.refresh_box.styleSheet())
+            # 深色下面板底框必须透明，不能整块发白。
+            self.assertIn("background:transparent", editor.styleSheet())
+
+            # 咖啡厅：面板与单元格用深色主题底色，正文为近白字。
+            cafe = CafeLayout(config=_Config())
+            self.widgets.append(cafe)
+            cells = cafe.findChildren(QFrame, "cafeCell")
+            self.assertTrue(cells)
+            for cell in cells:
+                self.assertIn(dark["background"], cell.styleSheet())
+            texts = cafe.findChildren(QLabel, "cafeText")
+            self.assertTrue(texts)
+            for label in texts:
+                self.assertIn(dark["text"], label.styleSheet())
+        finally:
+            configGui.set(configGui.themeMode, Theme.LIGHT, save=False)
+
+    # ------------------------------------------------------------------
     # DialogSettingBox sizing
     # ------------------------------------------------------------------
 
@@ -272,11 +349,65 @@ class ShopAndCafeLayoutTest(unittest.TestCase):
 
         available = dialog._available_geometry(parent)
         limit = min(parent.height(), available.height()) - _VERTICAL_CHROME - _SCREEN_MARGIN
-        expected = min(SHOP_VIEWPORT_HEIGHT, max(160, limit))
+        # 矮宿主窗口把内容高度上限压到单行商品最小高度以下，
+        # 弹窗钉在最小高度上，并且留在宿主窗口以内。
+        expected = max(160, limit)
         self.assertEqual(expected + _VERTICAL_CHROME, dialog.widget.height())
         # The dialog must stay inside a short host window instead of
         # spilling past it onto a taller monitor.
         self.assertLessEqual(dialog.widget.height(), parent.height())
+
+    def test_shop_dialog_grows_with_content_height(self):
+        # 弹窗高度必须随内容高度增长，不再被固定视口上限压矮：
+        # 内容低于宿主窗口/屏幕上限时，弹窗高度就是内容高度本身
+        # （竞技场商店一页放不下的回归）。构造期字体可能尚未应用
+        # 到商品名标签、长名换行按更小字体量矮，show 时
+        # _refit_shop_height 按就绪字体再量一次重设尺寸，断言的是
+        # show 后的最终高度。
+        config = _Config(arena_goods=[[f"Item {index}", 50] for index in range(8)])
+        parent = self._show(QWidget(), 700, 720)
+        panel = arenaShopPriority.Layout(config=config)
+        dialog = self._show(
+            DialogSettingBox(
+                parent,
+                config,
+                panel,
+                setting_name="arenaShopPriority",
+            ),
+            parent.width(),
+            parent.height(),
+        )
+
+        available = dialog._available_geometry(parent)
+        cap = max(
+            160,
+            min(parent.height(), available.height()) - _VERTICAL_CHROME - _SCREEN_MARGIN,
+        )
+        content_width = dialog.widget.width() - _HORIZONTAL_CHROME
+        desired = panel.heightForWidth(content_width)
+        self.assertEqual(min(cap, desired) + _VERTICAL_CHROME, dialog.widget.height())
+
+    def test_shop_dialog_without_overflow_has_no_goods_scrollbar(self):
+        # 商品一页放得下时，商品区不得出现竖向滚动条：弹窗高度按
+        # 内容收窄后，任何量高误差（滚动条宽度、网格最小高度钉死）
+        # 都会在这里显形。
+        config = _Config(arena_goods=[[f"Item {index}", 50] for index in range(8)])
+        parent = self._show(QWidget(), 700, 720)
+        dialog = self._show(
+            DialogSettingBox(
+                parent,
+                config,
+                arenaShopPriority.Layout(config=config),
+                setting_name="arenaShopPriority",
+            ),
+            parent.width(),
+            parent.height(),
+        )
+        self.app.processEvents()
+
+        scroll = dialog.findChild(QScrollArea, "shopGoodsScroll")
+        self.assertIsNotNone(scroll)
+        self.assertEqual(0, scroll.verticalScrollBar().maximum())
 
     def test_cafe_dialog_reaches_narrow_vertical_mode(self):
         narrow_parent = self._show(QWidget(), 600, 700)
@@ -292,7 +423,7 @@ class ShopAndCafeLayoutTest(unittest.TestCase):
             narrow_parent.height(),
         )
 
-        expected = self._expected_content_width(narrow_dialog, narrow_parent, 480, 820)
+        expected = self._expected_content_width(narrow_dialog, narrow_parent, 360, 820)
         self.assertEqual(expected + _HORIZONTAL_CHROME, narrow_dialog.widget.width())
         # The content must be able to drop below the 640 px breakpoint so
         # the cafe layout can actually switch to its vertical arrangement.

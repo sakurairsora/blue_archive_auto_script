@@ -5,8 +5,8 @@ from __future__ import annotations
 from math import ceil
 from typing import List, Sequence
 
-from PyQt5.QtCore import QEvent, Qt, QSize, QPointF, pyqtSignal
-from PyQt5.QtGui import QFontMetrics, QTextLayout, QTextOption
+from PyQt5.QtCore import QEvent, Qt, QSize, QPointF, QRectF, pyqtSignal
+from PyQt5.QtGui import QColor, QFontMetrics, QPainter, QPen, QTextLayout, QTextOption
 from PyQt5.QtWidgets import (
     QFrame,
     QGridLayout,
@@ -17,6 +17,8 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
+from gui.util.config_gui import configGui, COLOR_THEME
+
 GRID_COLUMNS = 4
 GRID_H_SPACING = 8
 GRID_V_SPACING = 8
@@ -24,7 +26,6 @@ SIDE_MARGIN = 12
 DEFAULT_VIEW_WIDTH = 800
 SHOP_PREFERRED_WIDTH = DEFAULT_VIEW_WIDTH
 SHOP_MAX_WIDTH = 1000
-SHOP_VIEWPORT_HEIGHT = 440
 CARD_PAD_X = 10
 CARD_PAD_Y = 8
 CARD_BORDER = 2
@@ -37,14 +38,16 @@ GREEN = "#6FBF63"
 GREEN_DIM = "#8FCF84"
 GREEN_CHECK = "#3D9A45"
 
+# 分类底色统一写成十六进制：样式表与 QColor（描边字填充）都必须
+# 能解析同一个值。rgb(...) 字符串 QColor 解析不了会得到无效黑色。
 CAT_BG = {
-    "exp_book": "rgb(242, 240, 240)",
-    "exp_bead": "rgb(154, 240, 248)",
-    "artifact": "rgb(255, 255, 255)",
-    "secret_stone": "rgb(248, 224, 247)",
-    "ap": "rgb(225, 246, 198)",
-    "credit": "rgb(255, 249, 200)",
-    "default": "rgb(250, 250, 250)",
+    "exp_book": "#F2F0F0",
+    "exp_bead": "#9AF0F8",
+    "artifact": "#FFFFFF",
+    "secret_stone": "#F8E0F7",
+    "ap": "#E1F6C6",
+    "credit": "#FFF9C8",
+    "default": "#FAFAFA",
 }
 
 
@@ -56,6 +59,28 @@ def get_category_colors() -> dict:
     不接入配置读写。
     """
     return dict(CAT_BG)
+
+
+def is_dark_theme() -> bool:
+    """当前是否深色主题。商店/咖啡厅的深色配色都从这里判断。"""
+    try:
+        return "dark" in str(configGui.theme.value).lower()
+    except Exception:
+        return False
+
+
+def _check_color() -> QColor:
+    """勾选标记的勾颜色：跟随设置中可修改的「主题颜色」。
+
+    取不到有效主题颜色时退回默认绿勾。选中框（绿边框）不跟随。
+    """
+    try:
+        color = QColor(configGui.themeColor.value)
+        if color.isValid():
+            return color
+    except Exception:
+        pass
+    return QColor(GREEN_CHECK)
 
 
 def classify_goods(raw_name: str) -> str:
@@ -149,6 +174,44 @@ class WrappingLabel(QLabel):
         return QSize(width, self.heightForWidth(width))
 
 
+CHECK_SIZE = 16
+
+
+class CheckMark(QWidget):
+    """商品卡勾选标记：固定尺寸 + 自绘，任何字体/主题下外观完全一致。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(CHECK_SIZE, CHECK_SIZE)
+        self._checked = False
+
+    def set_checked(self, checked: bool):
+        checked = bool(checked)
+        if self._checked == checked:
+            return
+        self._checked = checked
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        box = QRectF(self.rect()).adjusted(1.0, 1.0, -1.0, -1.0)
+        painter.fillRect(box, QColor("#FFFFFF"))
+        painter.setPen(QPen(QColor(70, 70, 70, 150), 1))
+        painter.drawRect(box)
+        if not self._checked:
+            return
+        # 整体统一粗勾：任何字体/缩放下都同一形状；勾色跟随设置里的
+        # 「主题颜色」。
+        pen = QPen(_check_color(), 3.5)
+        pen.setCapStyle(Qt.RoundCap)
+        pen.setJoinStyle(Qt.RoundJoin)
+        painter.setPen(pen)
+        w, h = float(self.width()), float(self.height())
+        painter.drawLine(QPointF(w * 0.22, h * 0.52), QPointF(w * 0.43, h * 0.73))
+        painter.drawLine(QPointF(w * 0.43, h * 0.73), QPointF(w * 0.80, h * 0.28))
+
+
 class GoodsCard(QFrame):
     """一张商品卡：整卡切换选中，名称随卡片宽度完整换行。"""
 
@@ -188,20 +251,11 @@ class GoodsCard(QFrame):
         top = QHBoxLayout()
         top.setContentsMargins(0, 0, 0, 0)
         top.setSpacing(7)
-        side = max(QFontMetrics(self.font()).height(), 16)
-        self.mark = QLabel(self)
-        self.mark.setFixedSize(side, side)
-        self.mark.setAlignment(Qt.AlignCenter)
-        self.mark.setStyleSheet(
-            "QLabel{"
-            f"color:{GREEN_CHECK};font-weight:700;"
-            "border:1px solid rgba(70,70,70,150);"
-            "border-radius:0;background:#FFFFFF;}"
-        )
+        # 勾选标记固定 16x16 自绘，不再随字体度量变扁、变形。
+        self.mark = CheckMark(self)
         top.addWidget(self.mark, 0, Qt.AlignLeft | Qt.AlignVCenter)
         self.price_lbl = QLabel(str(price_text or ""), self)
         self.price_lbl.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        self.price_lbl.setStyleSheet("color:#333;background:transparent;")
         self.price_lbl.setToolTip(self.price_lbl.text())
         top.addWidget(self.price_lbl, 0, Qt.AlignLeft | Qt.AlignVCenter)
         top.addStretch(1)
@@ -210,10 +264,21 @@ class GoodsCard(QFrame):
         self.name_lbl = WrappingLabel(str(name or ""), self)
         self.name_lbl.setAlignment(Qt.AlignLeft | Qt.AlignTop)
         self.name_lbl.setTextInteractionFlags(Qt.NoTextInteraction)
-        self.name_lbl.setStyleSheet("color:#222;background:transparent;")
         self.name_lbl.setToolTip(self.name_lbl.text())
         root.addWidget(self.name_lbl)
+        configGui.themeChanged.connect(self._on_theme_changed)
+        try:
+            # 「主题颜色」改变时勾色同步重绘（极旧版本没有该信号则跳过）。
+            configGui.themeColorChanged.connect(self._on_theme_color_changed)
+        except Exception:
+            pass
         self._apply_chrome()
+
+    def _on_theme_changed(self, *_):
+        self._apply_chrome()
+
+    def _on_theme_color_changed(self, *_):
+        self.mark.update()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -248,12 +313,26 @@ class GoodsCard(QFrame):
         return colors.get(self._category, colors.get("default", CAT_BG["default"]))
 
     def _apply_chrome(self):
-        bg = self._fill_bg()
-        self.mark.setText("✓" if self._checked else "")
+        dark = is_dark_theme()
+        category_color = self._fill_bg()
+        theme = COLOR_THEME[configGui.theme.value]
+        bg = theme['background'] if dark else category_color
+        border = theme['border'] if dark else "#B8B8B8"
+        self.mark.set_checked(self._checked)
+        # 深色下文字保留“跟分类底色一致”的特色：名称与单价都用该
+        # 商品的分类底色显示，不用纯白字。
+        self.name_lbl.setStyleSheet(
+            f"color:{category_color};background:transparent;" if dark else ""
+        )
+        self.price_lbl.setStyleSheet(
+            f"color:{category_color};background:transparent;"
+            if dark
+            else "color:#333;background:transparent;"
+        )
         self.setStyleSheet(
             "QFrame#baGoodsCard{"
             f"background-color:{bg};"
-            "border:2px solid #B8B8B8;"
+            f"border:2px solid {border};"
             f"border-radius:{CARD_RADIUS}px;}}"
         )
         if self._checked:
@@ -337,7 +416,12 @@ class ShopGoodsGrid(QWidget):
         for index, card in enumerate(self._cards):
             row, column = divmod(index, GRID_COLUMNS)
             self._grid.addWidget(card, row, column)
-        self._sync_height(self.width() or DEFAULT_VIEW_WIDTH)
+        # 宽度未知（构造期宽度为 0）时不要按某个预设宽度预设固定高度：
+        # 固定高度会同时被锁成网格的最小高度，宽窗口下实际网格更矮，
+        # 滚动区域不允许内容缩到最小高度以下，就会误判内容超高、
+        # 强行出滚动条并裁掉底部。首次定位由 resizeEvent 承接。
+        if self.width() > 0:
+            self._sync_height(self.width())
 
     def cards(self) -> List[GoodsCard]:
         return list(self._cards)
@@ -386,8 +470,15 @@ class ShopGoodsGrid(QWidget):
         return QSize(width, self.heightForWidth(width))
 
     def minimumSizeHint(self) -> QSize:
-        width = GRID_COLUMNS * MIN_COL_W + GRID_H_SPACING * (GRID_COLUMNS - 1)
-        return QSize(width, self.heightForWidth(width))
+        min_width = GRID_COLUMNS * MIN_COL_W + GRID_H_SPACING * (GRID_COLUMNS - 1)
+        if self.width() > 0:
+            # 已有真实宽度：最小高度就是当前宽度下的高度，
+            # 与 resizeEvent 里的固定高度保持同一口径。
+            return QSize(min_width, self.heightForWidth(self.width()))
+        # 真实宽度定下来之前报一个低高度：网格首次定位后会按真实
+        # 宽度自设固定高度。若按预设宽度量高，该高度会被滚动区域
+        # 当成内容最小高度，宽窗口下内容实际更矮时反而被误判超高。
+        return QSize(min_width, 40)
 
 
 ShopGoodCard = GoodsCard
